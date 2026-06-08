@@ -1,0 +1,86 @@
+import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.7.1"
+
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+}
+
+serve(async (req) => {
+  if (req.method === 'OPTIONS') {
+    return new Response('ok', { headers: corsHeaders })
+  }
+
+  try {
+    const supabaseClient = createClient(
+      Deno.env.get('SUPABASE_URL') ?? '',
+      Deno.env.get('SUPABASE_ANON_KEY') ?? '',
+      { global: { headers: { Authorization: req.headers.get('Authorization')! } } }
+    )
+
+    const { data: { user } } = await supabaseClient.auth.getUser()
+    if (!user) throw new Error('Unauthorized')
+
+    const { message, diagnosticId } = await req.json()
+
+    // Fetch diagnostic context
+    const { data: diagnostic } = await supabaseClient
+      .from('diagnostics')
+      .select('*')
+      .eq('id', diagnosticId)
+      .single()
+
+    const { data: history } = await supabaseClient
+      .from('ai_consultant_messages')
+      .select('*')
+      .eq('user_id', user.id)
+      .order('created_at', { ascending: true })
+      .limit(10)
+
+    const messages = [
+      {
+        role: 'system',
+        content: `Você é o PulseAI Consultant. Responda baseando-se nos dados do usuário.
+        Empresa: ${diagnostic?.company_name || 'Desconhecida'}
+        Setor: ${diagnostic?.industry || 'Desconhecido'}
+        Score Atual: ${diagnostic?.score || 'N/A'}
+        Dados do Diagnóstico: ${JSON.stringify(diagnostic?.results || {})}
+        
+        Seja prático, estratégico e focado em crescimento.`
+      },
+      ...(history || []).map(m => ({ role: m.role, content: m.content })),
+      { role: 'user', content: message }
+    ]
+
+    const response = await fetch('https://api.lovable.ai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${Deno.env.get('LOVABLE_API_KEY')}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'gemini-1.5-flash',
+        messages,
+      }),
+    })
+
+    const aiResult = await response.json()
+    const reply = aiResult.choices[0].message.content
+
+    // Save history
+    await supabaseClient.from('ai_consultant_messages').insert([
+      { user_id: user.id, role: 'user', content: message },
+      { user_id: user.id, role: 'assistant', content: reply }
+    ])
+
+    return new Response(JSON.stringify({ reply }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    })
+
+  } catch (error) {
+    return new Response(JSON.stringify({ error: error.message }), {
+      status: 400,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    })
+  }
+})

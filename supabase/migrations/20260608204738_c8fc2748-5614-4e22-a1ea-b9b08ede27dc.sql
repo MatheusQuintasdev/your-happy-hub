@@ -1,0 +1,4 @@
+ALTER TABLE public.ai_insights 
+ADD COLUMN IF NOT EXISTS executive_summary TEXT,
+ADD COLUMN IF NOT EXISTS bottlenecks JSONB,
+ADD COLUMN IF NOT EXISTS scores JSONB;
